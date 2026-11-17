@@ -14,6 +14,10 @@ runtime that actually fits on a 32 MB router.
 - Write posts in Markdown (headings, lists, quotes, code fences, links, images)
 - LaTeX math (`$...$`, `$$...$$`, `\(...\)`, `\[...\]`) rendered by a bundled
   KaTeX, so formulas never get mangled by Markdown
+- Pasted Unicode maths is normalised first: `√(x²)` / `∛(...)` become
+  `\sqrt`/`\sqrt[3]`, `x²` becomes `x^{2}`, and Greek letters, `≤`, `×`, `∞`
+  and friends become their LaTeX commands; PDF overline runs that show up as
+  long bars are dropped
 - Syntax highlighting for code fences via a bundled highlight.js
 - Light / dark / follow-system themes, and an English / 中文 UI switch
 - Drafts vs published, tags, search, pagination

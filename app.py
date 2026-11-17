@@ -207,6 +207,58 @@ def parse_session(secret, value, now=None):
 SAFE_URL = re.compile(r"^(?:https?://|mailto:|/|#|\.{0,2}/)")
 MATH_TOKEN = "\x00M%d\x00"
 INLINE_MATH = re.compile(r"\\\((.+?)\\\)|\$(?![\s$])([^$\n]+?)(?<!\\)\$(?![\d$])")
+RADICAL_TEXT = re.compile(
+    r"([√∛∜])\s*(\([^()\n]*\)|\[[^\[\]\n]*\]|\{[^{}\n]*\}|[A-Za-z0-9^_.]+)")
+BAR_RUN = re.compile(r"[‾¯⎯⎺]{2,}")
+
+SUPERSCRIPT = {"⁰": "0", "¹": "1", "²": "2", "³": "3", "⁴": "4", "⁵": "5",
+               "⁶": "6", "⁷": "7", "⁸": "8", "⁹": "9", "⁺": "+", "⁻": "-",
+               "ⁿ": "n", "ⁱ": "i"}
+GREEK = {"α": "\\alpha", "β": "\\beta", "γ": "\\gamma", "δ": "\\delta",
+         "ε": "\\epsilon", "ζ": "\\zeta", "η": "\\eta", "θ": "\\theta",
+         "ι": "\\iota", "κ": "\\kappa", "λ": "\\lambda", "μ": "\\mu",
+         "ν": "\\nu", "ξ": "\\xi", "π": "\\pi", "ρ": "\\rho", "σ": "\\sigma",
+         "τ": "\\tau", "υ": "\\upsilon", "φ": "\\phi", "χ": "\\chi",
+         "ψ": "\\psi", "ω": "\\omega", "Γ": "\\Gamma", "Δ": "\\Delta",
+         "Θ": "\\Theta", "Λ": "\\Lambda", "Ξ": "\\Xi", "Π": "\\Pi",
+         "Σ": "\\Sigma", "Φ": "\\Phi", "Ψ": "\\Psi", "Ω": "\\Omega"}
+SYMBOLS = {"×": "\\times", "÷": "\\div", "±": "\\pm", "∓": "\\mp",
+           "≤": "\\le", "≥": "\\ge", "≠": "\\neq", "≈": "\\approx",
+           "≡": "\\equiv", "∞": "\\infty", "∈": "\\in", "∉": "\\notin",
+           "⊂": "\\subset", "⊆": "\\subseteq", "∪": "\\cup", "∩": "\\cap",
+           "→": "\\to", "⇒": "\\Rightarrow", "⇔": "\\Leftrightarrow",
+           "∂": "\\partial", "∇": "\\nabla", "∑": "\\sum", "∏": "\\prod",
+           "∫": "\\int", "−": "-", "–": "-", "—": "-", "·": "\\cdot",
+           "…": "\\ldots", "°": "^\\circ", "′": "'", "″": "''"}
+
+
+def _fix_radicals(tex):
+    def repl(m):
+        index = {"√": "", "∛": "3", "∜": "4"}.get(m.group(1), "")
+        arg = m.group(2)
+        if arg[:1] in "([{":
+            arg = arg[1:-1]
+        opt = "" if not index else "[%s]" % index
+        return "\\sqrt%s{%s}" % (opt, arg)
+
+    return re.sub(r"([√∛∜])\s*(\([^()]*\)|\{[^{}]*\}|[A-Za-z0-9^_{}.]+)", repl, tex)
+
+
+def normalize_tex(tex):
+    """Turn pasted Unicode maths (√, ², α, ≤, ...) into LaTeX.
+
+    PDF/Word copy-paste usually loses the LaTeX and leaves characters KaTeX
+    rejects, which is what made radicals show up as raw text with long bars.
+    """
+    tex = tex.replace("\u0305", "").replace("\u00af", "").replace("\u203e", "")
+    tex = tex.replace("\u23af", "").replace("\u23ba", "")
+    tex = re.sub(r"[%s]+" % "".join(SUPERSCRIPT),
+                 lambda m: "^{%s}" % "".join(SUPERSCRIPT[c] for c in m.group(0)), tex)
+    for ch, cmd in GREEK.items():
+        tex = tex.replace(ch, cmd + " ")
+    for ch, cmd in SYMBOLS.items():
+        tex = tex.replace(ch, cmd + " ")
+    return _fix_radicals(tex)
 
 
 def safe_url(u):
@@ -259,7 +311,7 @@ def _extract_math(text):
     i = 0
 
     def add(tex, display):
-        tex = tex.strip()
+        tex = normalize_tex(tex.strip())
         if not tex:
             return ""
         items.append((tex, display))
@@ -276,6 +328,9 @@ def _extract_math(text):
             out.append(line)
             i += 1
             continue
+
+        # drop PDF overline/radical extension runs that paste in as long bars
+        line = BAR_RUN.sub("", line)
 
         stripped = line.strip()
         m = re.match(r"^\$\$(.+?)\$\$$", stripped)
@@ -313,7 +368,15 @@ def _extract_math(text):
                 return m.group(0)
             return add(tex, False)
 
-        out.append(INLINE_MATH.sub(repl, line))
+        line = INLINE_MATH.sub(repl, line)
+
+        def repl_radical(m):
+            after = line[m.end():]
+            if m.group(2)[:1] not in "([{" and after.lstrip().startswith("("):
+                return m.group(0)
+            return add(_fix_radicals(m.group(0)), False)
+
+        out.append(RADICAL_TEXT.sub(repl_radical, line))
         i += 1
     return "\n".join(out), items
 
