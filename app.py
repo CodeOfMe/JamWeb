@@ -35,6 +35,7 @@ python3-sqlite3. Tested with Python 3.8+.
 """
 
 import argparse
+import base64
 import getpass
 import hashlib
 import hmac
@@ -755,7 +756,7 @@ class Config:
 class Handler(BaseHTTPRequestHandler):
     server_version = "%s/%s" % (APP, VERSION)
     protocol_version = "HTTP/1.1"
-    max_body = 1024 * 1024
+    max_body = 12 * 1024 * 1024
 
     # ---- plumbing --------------------------------------------------------
     @property
@@ -1463,7 +1464,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def post_save(self, conn, user, form):
         title = (form.get("title") or "").strip()
-        body = form.get("body") or ""
+        body = self.ingest_data_uris(form.get("body") or "")
         tags = self.norm_tags(form.get("tags") or "")
         status = "draft" if form.get("status") == "draft" else "published"
         slug = (form.get("slug") or "").strip().lower()
@@ -1492,6 +1493,38 @@ class Handler(BaseHTTPRequestHandler):
             )
         conn.commit()
         return self.redirect(self.url("/admin?ok=Saved"))
+
+    def ingest_data_uris(self, body):
+        """Replace inline data:image/...;base64 payloads with uploaded files.
+
+        Browsers sometimes paste a screenshot as a data URI (or an <img> with
+        one) instead of handing us a File, so convert those on save.
+        """
+        pattern = re.compile(
+            r"data:image/(?:png|jpe?g|gif|webp|svg\+xml);base64,([A-Za-z0-9+/=\s]+)")
+        cache = {}
+
+        def repl(m):
+            payload = re.sub(r"\s+", "", m.group(1))
+            if payload in cache:
+                return cache[payload]
+            try:
+                data = base64.b64decode(payload, validate=False)
+            except (ValueError, TypeError):
+                return m.group(0)
+            ext = self.sniff_image(data)
+            if not ext or len(data) > MAX_UPLOAD:
+                return m.group(0)
+            os.makedirs(MEDIA_DIR, exist_ok=True)
+            name = "%s-%s%s" % (datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S"),
+                                secrets.token_hex(4), ext)
+            with open(os.path.join(MEDIA_DIR, name), "wb") as fh:
+                fh.write(data)
+            url = self.url("/media/" + name)
+            cache[payload] = url
+            return url
+
+        return pattern.sub(repl, body)
 
     def post_delete(self, conn, user, form):
         pid = form.get("id", "")

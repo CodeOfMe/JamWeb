@@ -77,12 +77,49 @@
     }
 
     ta.addEventListener("paste", function (ev) {
-      var items = ev.clipboardData ? ev.clipboardData.items : [];
+      var cd = ev.clipboardData;
+      if (!cd) return;
+
+      var items = cd.items || [];
       for (var i = 0; i < items.length; i++) {
         if (items[i].kind === "file" && items[i].type.indexOf("image/") === 0) {
           var f = items[i].getAsFile();
           if (f) { ev.preventDefault(); upload(f, f.name); return; }
         }
+      }
+
+      if (cd.files && cd.files.length) {
+        for (var j = 0; j < cd.files.length; j++) {
+          if (cd.files[j].type.indexOf("image/") === 0) {
+            ev.preventDefault();
+            upload(cd.files[j], cd.files[j].name);
+            return;
+          }
+        }
+      }
+
+      // pasted HTML (a copied web page): take the first image instead of the markup
+      var htmlText = "";
+      try { htmlText = cd.getData("text/html") || ""; } catch (e) { htmlText = ""; }
+      if (!htmlText) return;
+      var img = htmlText.match(/<img[^>]+src\s*=\s*["']([^"']+)["']/i);
+      if (!img) return;
+      var src = img[1];
+      if (src.indexOf("data:image/") === 0) {
+        ev.preventDefault();
+        var parts = src.split(",");
+        var mime = /data:([^;]+)/.exec(parts[0]);
+        if (!mime || parts.length < 2) return;
+        var binary = atob(parts[1]);
+        var bytes = new Uint8Array(binary.length);
+        for (var k = 0; k < binary.length; k++) bytes[k] = binary.charCodeAt(k);
+        var ext = (mime[1].split("/")[1] || "png").replace("+xml", "");
+        upload(new Blob([bytes], { type: mime[1] }), "pasted." + ext);
+        return;
+      }
+      if (/^https?:\/\//i.test(src)) {
+        ev.preventDefault();
+        insert("![image](" + src + ")\n");
       }
     });
 
