@@ -341,11 +341,12 @@ def _extract_math(text):
             out.append(add(m.group(1), True))
             i += 1
             continue
-        m = re.match(r"^\\\[(.+?)\\\]$", stripped)
-        if m:
-            out.append(add(m.group(1), True))
-            i += 1
-            continue
+        # \[ ... \] on one line, possibly with text before/after it
+        if "\\[" in line and "\\]" in line:
+            line = re.sub(r"\\\[(.+?)\\\]", lambda m: add(m.group(1), True), line)
+            if not line.strip():
+                i += 1
+                continue
         if "\\[" in line and "\\]" not in line:
             start = line.find("\\[")
             buf = [line[start + 2:]]
