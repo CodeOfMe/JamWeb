@@ -92,6 +92,12 @@ title, filename becomes the slug). Handy for moving an existing blog in.
 
 ## Routes
 
+There are two entrances: **visitors** use `/` (public posts) and the
+**administrator** uses `/admin` (login or dashboard). The public nav shows an
+`Admin` link unless you tick *Hide the Admin link* in Settings, in which case
+`/admin` is reachable by URL only. Logged-in admins get an extra *View site*
+link back to the public pages.
+
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/` | post list, `?page=N` |

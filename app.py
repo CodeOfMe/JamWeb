@@ -86,6 +86,7 @@ DEFAULTS = {
     "tagline": "A tiny Python + SQLite CMS",
     "footer": "Powered by JamWeb",
     "per_page": "10",
+    "hide_admin_link": "0",
     "secret": "",
 }
 
@@ -375,14 +376,16 @@ def layout(srv, conn, title, body, user=None, flash="", error="", url=None):
     tagline = get_setting(conn, "tagline", "")
     footer = get_setting(conn, "footer", "")
     u = url or (lambda p: srv.base + p)
+    hide_admin = get_setting(conn, "hide_admin_link", "0") == "1"
     nav = ['<a href="%s">Home</a>' % u("/")]
     nav.append('<a href="%s">Feed</a>' % u("/feed.xml"))
     if user:
         nav.append('<a href="%s">Admin</a>' % u("/admin"))
         nav.append('<a href="%s">New post</a>' % u("/admin/edit?new=1"))
+        nav.append('<a href="%s">View site</a>' % u("/"))
         nav.append('<a href="%s">Log out</a>' % u("/admin/logout"))
-    else:
-        nav.append('<a href="%s">Log in</a>' % u("/admin"))
+    elif not hide_admin:
+        nav.append('<a href="%s">Admin</a>' % u("/admin"))
     head = site if not title else "%s · %s" % (esc(title), esc(site))
     parts = [
         "<!doctype html>",
@@ -735,11 +738,14 @@ class Handler(BaseHTTPRequestHandler):
     def view_login(self, conn, qs):
         error = "Wrong username or password." if qs.get("e") else ""
         body = (
-            '<div class="login"><h1 class="title">Log in</h1>'
+            '<div class="login"><h1 class="title">Administrator</h1>'
+            '<p class="meta">Visitors do not need to log in: the public site is the '
+            '<a href="%s">home page</a>. This form is for the administrator only.</p>'
             '<form method="post" action="%s">'
             '<label>Username</label><input type="text" name="username" autocomplete="username" autofocus>'
             '<label>Password</label><input type="password" name="password" autocomplete="current-password">'
-            '<button class="primary" type="submit">Log in</button></form></div>' % self.url("/admin/login")
+            '<button class="primary" type="submit">Log in</button></form></div>'
+            % (self.url("/"), self.url("/admin/login"))
         )
         self.page(conn, "Log in", body, code=200 if not error else 401, error=error)
 
@@ -833,6 +839,8 @@ class Handler(BaseHTTPRequestHandler):
             '<label>Tagline</label><input type="text" name="tagline" value="%s">'
             '<label>Footer</label><input type="text" name="footer" value="%s">'
             '<label>Posts per page (1-50)</label><input type="text" name="per_page" value="%s">'
+            '<label><input type="checkbox" name="hide_admin_link" value="1"%s> '
+            "Hide the Admin link on the public site (visitors then reach it only via /admin)</label>"
             '<button class="primary" type="submit">Save</button></form>'
             % (
                 self.url("/admin/settings"),
@@ -841,6 +849,7 @@ class Handler(BaseHTTPRequestHandler):
                 esc(get_setting(conn, "tagline")),
                 esc(get_setting(conn, "footer")),
                 esc(get_setting(conn, "per_page", "10")),
+                " checked" if get_setting(conn, "hide_admin_link", "0") == "1" else "",
             )
         )
         self.page(conn, "Settings", body, user=user, flash=(qs.get("ok") or [""])[0])
@@ -979,6 +988,7 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             per = 10
         set_setting(conn, "per_page", str(per))
+        set_setting(conn, "hide_admin_link", "1" if form.get("hide_admin_link") else "0")
         conn.commit()
         return self.redirect(self.url("/admin/settings?ok=Saved"))
 
