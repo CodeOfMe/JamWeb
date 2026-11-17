@@ -63,6 +63,20 @@ location /blog/ {
 
 and start the service with `JAMWEB_BASE=/blog`.
 
+### HTTPS
+
+The app speaks plain HTTP; terminate TLS in front of it. `deploy/nginx-8443.conf`
+is a ready-made nginx server block that proxies `https://host:8443/` to
+`127.0.0.1:8080` and forwards `X-Forwarded-Proto` (which makes the session
+cookie `Secure`).
+
+On OpenWrt:
+
+```sh
+cp deploy/nginx-8443.conf /etc/nginx/conf.d/jamweb.conf
+nginx -t -c /etc/nginx/uci.conf && nginx -s reload -c /etc/nginx/uci.conf
+```
+
 ## CLI
 
 ```

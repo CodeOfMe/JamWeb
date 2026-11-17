@@ -456,6 +456,10 @@ class Handler(BaseHTTPRequestHandler):
         row = conn.execute("SELECT username FROM users WHERE username=?", (user,)).fetchone()
         return row["username"] if row else None
 
+    @property
+    def secure_cookie(self):
+        return self.headers.get("X-Forwarded-Proto", "").lower() == "https"
+
     def csrf(self, conn, user):
         exp = int(time.time()) + 86400
         return "%d.%s" % (exp, sign(self.secret(conn), "csrf.%s.%d" % (user, exp)))
@@ -925,7 +929,8 @@ class Handler(BaseHTTPRequestHandler):
         self.redirect(
             self.url("/admin"),
             [("Set-Cookie",
-              "jw_session=%s; Path=/; Max-Age=604800; HttpOnly; SameSite=Lax" % value)],
+              "jw_session=%s; Path=/; Max-Age=604800; HttpOnly; SameSite=Lax%s"
+              % (value, "; Secure" if self.secure_cookie else ""))],
         )
 
     def post_save(self, conn, user, form):
