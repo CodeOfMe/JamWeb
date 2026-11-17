@@ -206,7 +206,7 @@ def parse_session(secret, value, now=None):
 # --------------------------------------------------------------------------
 SAFE_URL = re.compile(r"^(?:https?://|mailto:|/|#|\.{0,2}/)")
 MATH_TOKEN = "\x00M%d\x00"
-INLINE_MATH = re.compile(r"\\\((.+?)\\\)|\$(?![\s$])([^$\n]+?)(?<!\\)\$(?![\d$])")
+INLINE_MATH = re.compile(r"\\\((.+?)\\\)|\$(?!\$)([^$\n]+?)(?<!\\)\$(?![\d$])")
 RADICAL_TEXT = re.compile(
     r"([√∛∜])\s*(\([^()\n]*\)|\[[^\[\]\n]*\]|\{[^{}\n]*\}|[A-Za-z0-9^_.]+)")
 BAR_RUN = re.compile(r"[‾¯⎯⎺]{2,}")
@@ -279,7 +279,8 @@ def _math_html(items, idx):
 
 def _inline(s, items=()):
     if items:
-        s = re.sub(r"\x00M(\d+)\x00", lambda m: _math_html(items, int(m.group(1))), s)
+        # keep formulas out of the emphasis/link regexes, then expand them last
+        s = re.sub(r"\x00M(\d+)\x00", lambda m: "\x01%d\x01" % int(m.group(1)), s)
     s = re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
     s = re.sub(
         r"!\[([^\]]*)\]\(([^)\s]+)\)",
@@ -294,6 +295,8 @@ def _inline(s, items=()):
     s = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", s)
     s = re.sub(r"(?<![\w*])\*([^*\n]+)\*(?![\w*])", r"<em>\1</em>", s)
     s = re.sub(r"~~([^~]+)~~", r"<del>\1</del>", s)
+    if items:
+        s = re.sub(r"\x01(\d+)\x01", lambda m: _math_html(items, int(m.group(1))), s)
     return s
 
 
@@ -342,6 +345,24 @@ def _extract_math(text):
         if m:
             out.append(add(m.group(1), True))
             i += 1
+            continue
+        if "\\[" in line and "\\]" not in line:
+            start = line.find("\\[")
+            buf = [line[start + 2:]]
+            i += 1
+            rest = ""
+            while i < len(lines):
+                if "\\]" in lines[i]:
+                    pos = lines[i].find("\\]")
+                    buf.append(lines[i][:pos])
+                    rest = lines[i][pos + 2:]
+                    i += 1
+                    break
+                buf.append(lines[i])
+                i += 1
+            out.append(add("\n".join(buf), True))
+            if rest.strip():
+                out.append(rest)
             continue
         if "$$" in line and line.count("$$") == 1:
             start = line.find("$$")
