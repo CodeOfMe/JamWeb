@@ -1,7 +1,0 @@
-# Hello from JamWeb
-
-This is a sample post. Edit files in `/etc/jamweb/site/posts/` — each `.txt`
-or `.html` file becomes a post. The first line is used as the title.
-
-JamWeb is a tiny Java blog server meant to run on minimal JVMs such as
-JamVM + GNU Classpath, so it can live on very small OpenWrt devices.

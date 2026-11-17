@@ -1,92 +1,115 @@
 # JamWeb
 
-A minimal **Java blog / HTTP server** designed to run on very small JVMs such as
-**JamVM + GNU Classpath** (Java 5 level). One source file, one tiny jar, no
-external libraries, no servlet container, no NIO.
+A tiny **CMS** for small machines: one Python file, one SQLite file, no
+dependencies beyond the Python 3 standard library. It runs comfortably on an
+OpenWrt router with `python3-light` + `python3-sqlite3` (a few MB), or on any
+Linux box.
 
-It turns a directory of text/HTML files into a simple blog:
+Originally a JamVM/Java experiment; rewritten in Python because that is the
+runtime that actually fits on a 32 MB router.
 
-- `GET /` — index listing all posts (first line of each file is the title)
-- `GET /p/<slug>` — render a post (`posts/<slug>.txt` or `.html`)
-- everything else — served as static files from the site root
+## Features
 
-## Why
+- SQLite storage (WAL mode), single file, trivial to back up
+- Write posts in Markdown (headings, lists, quotes, code fences, links, images)
+- Drafts vs published, tags, search, pagination
+- RSS feed at `/feed.xml`
+- Admin UI: dashboard, editor, settings, password change, one-click backup
+- Secure defaults: PBKDF2 password hashing, HMAC-signed session cookies,
+  CSRF tokens, HTML escaping, strict slug validation, login throttling
+- Zero third-party packages; ~40 KB of Python
 
-Running a full Java CMS (Jetty + Pebble, Tomcat, etc.) needs ~80–250 MB and a
-modern JRE — far too big for 32/64 MB embedded routers. JamWeb plus a small JVM
-gives you a working Java blog in a few hundred KB of bytecode and a few MB of
-runtime, which can fit on constrained OpenWrt devices.
-
-## Requirements
-
-- Any Java runtime. Best for tiny devices: **JamVM** (1.5.4 / 2.0.0) with
-  **GNU Classpath**, or any Java 5+ runtime, or a normal OpenJDK 8+.
-- No other dependencies.
-
-> JamVM/Classpath are not in every OpenWrt feed. On devices without a Java
-> runtime you must supply one (build JamVM/Classpath, or use a musl OpenJDK if
-> you have enough storage).
-
-## Build
+## Quick start (any Linux / macOS)
 
 ```sh
-./build.sh          # -> jamweb.jar
+python3 app.py --db data/jamweb.db init --user admin --title "My Blog"
+python3 app.py --db data/jamweb.db serve --port 8080
+# open http://localhost:8080/  (admin at /admin)
 ```
 
-### Producing JamVM-compatible bytecode
-
-JamVM runs old class files (Java 5, class version 49). Modern `javac` (JDK 17+)
-can no longer target 1.5, so use the Eclipse compiler which can:
-
-```sh
-curl -L -o ecj.jar \
-  https://repo1.maven.org/maven2/org/eclipse/jdt/ecj/3.33.0/ecj-3.33.0.jar
-./build.sh          # auto-detects ./ecj.jar and emits Java 5 bytecode
-```
-
-## Run
-
-```sh
-./run.sh            # uses jamvm if present, else java
-# or explicitly:
-java -cp jamweb.jar JamWeb --port 8080 --root /etc/jamweb/site --title "My Blog"
-```
-
-Port / root / title can also come from env vars `PORT`, `ROOT`, `TITLE`.
+`init` prints a generated password unless you pass `--password`.
 
 ## Install on OpenWrt
 
 ```sh
-./build.sh
-DEST=/usr/share/jamweb SITE=/etc/jamweb/site ./install.sh
-# then open http://<router>:8080/
+opkg update
+opkg install python3-light python3-sqlite3 python3-logging python3-email
+./install.sh
 ```
 
-The install script copies the jar, a procd init script (`/etc/init.d/jamweb`),
-and seeds a sample site at `/etc/jamweb/site/posts/`.
+`install.sh` copies the app to `/usr/lib/jamweb`, creates
+`/etc/jamweb/jamweb.db`, installs the procd service, opens the LAN firewall
+port, and starts it on **8080**.
 
-## Writing posts
+Useful environment variables:
 
-Drop `.txt` (plain, HTML-escaped) or `.html` (rendered as-is) files into
-`/etc/jamweb/site/posts/`. The first line becomes the title. Files are listed
-newest-first by filename.
-
-## Footprint
-
-| Component | Size |
+| Variable | Meaning |
 |---|---|
-| `jamweb.jar` (this app) | ~15 KB |
-| JamVM | ~200 KB |
-| GNU Classpath | ~2–5 MB |
+| `JAMWEB_PORT` | listen port (default `8080`) |
+| `JAMWEB_DB` | database path (default `/etc/jamweb/jamweb.db`) |
+| `JAMWEB_USER` / `JAMWEB_PASSWORD` | admin account created on install |
+| `JAMWEB_BASE` | URL prefix when behind a reverse proxy, e.g. `/blog` |
+| `JAMWEB_PUBLIC_URL` | absolute site URL used in the RSS feed |
+| `JAMWEB_SITE` | directory for `static/` assets |
 
-Total runtime fits in a few MB — small enough for modest embedded flash.
+Example: serve under `http://router/blog/` through nginx:
 
-## Security
+```
+location /blog/ {
+    proxy_pass http://127.0.0.1:8080/;
+    proxy_set_header Host $host;
+}
+```
 
-- Path traversal is blocked (`..`, canonical path check).
-- Bound to all interfaces on the chosen port; run behind your router firewall.
-- No authentication / no write API in this minimal build (read-only blog).
+and start the service with `JAMWEB_BASE=/blog`.
+
+## CLI
+
+```
+app.py init    [--user NAME] [--password PW] [--title TITLE]
+app.py serve   [--host H] [--port N]
+app.py passwd  [--user NAME] [--password PW]
+app.py backup  [--out FILE]
+app.py import  DIR
+```
+
+`import` loads a directory of `.md` files (first `# heading` becomes the
+title, filename becomes the slug). Handy for moving an existing blog in.
+
+## Routes
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/` | post list, `?page=N` |
+| GET | `/p/<slug>` | single post |
+| GET | `/tag/<tag>` | posts by tag |
+| GET | `/search?q=` | title/body search |
+| GET | `/feed.xml` | RSS 2.0 |
+| GET | `/static/<file>` | files from `site/static` |
+| GET | `/admin` | dashboard / login |
+| GET | `/admin/edit?id=N` | editor (`?new=1` for new) |
+| GET | `/admin/settings`, `/admin/password`, `/admin/backup` | admin tools |
+| POST | `/admin/save`, `/admin/delete`, `/admin/settings`, `/admin/password`, `/admin/login`, `/admin/logout` | mutations |
+
+## Layout
+
+```
+app.py            the whole CMS (server + CLI)
+install.sh        OpenWrt installer
+init.d/jamweb     procd service
+site/static/      optional static assets
+data/             default database location (gitignored)
+```
+
+## Security notes
+
+- All rendering escapes user content first; only a small Markdown subset is
+  converted, and URLs are restricted to `http(s)`, `mailto` and local paths.
+- Sessions are `HttpOnly`, `SameSite=Lax`, signed with a per-install secret and
+  valid for 7 days. Forms carry per-session CSRF tokens.
+- Run it behind your router firewall. If you expose it to the WAN, put TLS in
+  front (nginx/caddy) and set `Secure` on the cookie.
 
 ## License
 
-MIT. See `LICENSE`.
+MIT

@@ -1,25 +1,75 @@
 #!/bin/sh
-# Install JamWeb on OpenWrt (or any Linux).
+# Install JamWeb (Python + SQLite CMS) on OpenWrt.
+#
+# Requires: python3-light and python3-sqlite3 (+ python3-logging, python3-email
+# if you use the tiny bundled HTTP server's defaults).
+#
+#   opkg update
+#   opkg install python3-light python3-sqlite3 python3-logging python3-email
+#   ./install.sh
+#
+# Env overrides: JAMWEB_PORT (default 8080), JAMWEB_USER, JAMWEB_TITLE,
+#                JAMWEB_DB (default /etc/jamweb/jamweb.db)
 set -e
-HERE=$(cd "$(dirname "$0")" && pwd)
-DEST="${DEST:-/usr/share/jamweb}"
-SITE="${SITE:-/etc/jamweb/site}"
 
-[ -f "$HERE/jamweb.jar" ] || { echo "build first: ./build.sh"; exit 1; }
+SRC=$(cd "$(dirname "$0")" && pwd)
+DEST=/usr/lib/jamweb
+DB=${JAMWEB_DB:-/etc/jamweb/jamweb.db}
+PORT=${JAMWEB_PORT:-8080}
 
-mkdir -p "$DEST" "$SITE/posts"
-cp "$HERE/jamweb.jar" "$DEST/"
-cp "$HERE/run.sh" "$DEST/run.sh"
-chmod +x "$DEST/run.sh"
-# seed sample site if empty
-if [ ! -f "$SITE/posts/hello.txt" ]; then
-	cp -r "$HERE/site/." "$SITE/" 2>/dev/null || true
+command -v python3 >/dev/null 2>&1 || {
+  echo "python3 not found. Run: opkg install python3-light" >&2
+  exit 1
+}
+
+python3 - <<'PY' || {
+import sys
+try:
+    import sqlite3
+except Exception:
+    sys.exit(1)
+PY
+  echo "python3-sqlite3 not available. Run: opkg install python3-sqlite3" >&2
+  exit 1
+}
+
+mkdir -p "$DEST" "$(dirname "$DB")"
+cp "$SRC/app.py" "$DEST/app.py"
+chmod 755 "$DEST/app.py"
+
+cp "$SRC/init.d/jamweb" /etc/init.d/jamweb
+chmod 755 /etc/init.d/jamweb
+
+if [ ! -f "$DB" ]; then
+  python3 "$DEST/app.py" --db "$DB" init \
+    --user "${JAMWEB_USER:-admin}" \
+    --title "${JAMWEB_TITLE:-JamWeb}"
 fi
-# init script (procd on OpenWrt)
-if [ -d /etc/init.d ]; then
-	cp "$HERE/init.d/jamweb" /etc/init.d/jamweb
-	chmod +x /etc/init.d/jamweb
-	/etc/init.d/jamweb enable 2>/dev/null || true
-	/etc/init.d/jamweb restart 2>/dev/null || true
+
+/etc/init.d/jamweb enable
+/etc/init.d/jamweb restart
+
+echo
+echo "JamWeb installed."
+echo "  site:  http://<router-ip>:${PORT}/"
+echo "  admin: http://<router-ip>:${PORT}/admin"
+echo "  db:    ${DB}"
+if [ -n "$JAMWEB_PASSWORD" ]; then
+  python3 "$DEST/app.py" --db "$DB" passwd --user "${JAMWEB_USER:-admin}" --password "$JAMWEB_PASSWORD"
 fi
-echo "Installed. Open http://<router>:8080/"
+
+# Open the port if a firewall is active.
+if command -v uci >/dev/null 2>&1; then
+  uci -q get firewall.jamweb >/dev/null 2>&1 || {
+    uci set firewall.jamweb=rule
+    uci set firewall.jamweb.name='Allow-JamWeb'
+    uci set firewall.jamweb.src='lan'
+    uci set firewall.jamweb.dest_port="$PORT"
+    uci set firewall.jamweb.proto='tcp'
+    uci set firewall.jamweb.target='ACCEPT'
+    uci commit firewall
+    /etc/init.d/firewall reload >/dev/null 2>&1 || true
+  }
+fi
+
+exit 0

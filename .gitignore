@@ -1,4 +1,7 @@
-out/
-*.class
-*.jar
+data/
+*.db
+*.db-wal
+*.db-shm
+__pycache__/
+*.py[cod]
 .DS_Store
