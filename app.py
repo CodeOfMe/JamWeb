@@ -385,6 +385,9 @@ def _extract_math(text):
             continue
 
         def repl(m):
+            if m.group(1) is not None:
+                # \( ... \) is unambiguous, even for bare numbers like \([0,1]\)
+                return add(m.group(1), False)
             tex = m.group(1) or m.group(2) or ""
             if not re.search(r"[A-Za-z\\{}^_]", tex):
                 return m.group(0)
