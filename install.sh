@@ -34,6 +34,7 @@ PY
 }
 
 mkdir -p "$DEST" "$(dirname "$DB")"
+mkdir -p "${JAMWEB_MEDIA:-/etc/jamweb/media}"
 cp "$SRC/app.py" "$DEST/app.py"
 chmod 755 "$DEST/app.py"
 

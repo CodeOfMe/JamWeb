@@ -13,7 +13,8 @@ start_service() {
 		--db /etc/jamweb/jamweb.db serve --host 0.0.0.0 --port "$JAMWEB_PORT"
 	procd_set_param env \
 		JAMWEB_BASE="${JAMWEB_BASE:-}" \
-		JAMWEB_PUBLIC_URL="${JAMWEB_PUBLIC_URL:-}"
+		JAMWEB_PUBLIC_URL="${JAMWEB_PUBLIC_URL:-}" \
+		JAMWEB_MEDIA="${JAMWEB_MEDIA:-/etc/jamweb/media}"
 	procd_set_param respawn 3600 5 5
 	procd_set_param stdout 1
 	procd_set_param stderr 1

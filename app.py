@@ -39,6 +39,7 @@ import getpass
 import hashlib
 import hmac
 import html
+import json
 import os
 import re
 import secrets
@@ -55,7 +56,11 @@ APP = "JamWeb"
 VERSION = "1.0.0"
 HERE = os.path.dirname(os.path.abspath(__file__))
 SITE_DIR = os.environ.get("JAMWEB_SITE", os.path.join(HERE, "site"))
+MEDIA_DIR = os.environ.get("JAMWEB_MEDIA", os.path.join(HERE, "media"))
 DEFAULT_DB = os.path.join(HERE, "data", "jamweb.db")
+MAX_UPLOAD = 8 * 1024 * 1024
+MEDIA_EXT = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+             ".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml"}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS settings (
@@ -615,6 +620,8 @@ button.danger{background:transparent;border-color:var(--danger);color:var(--dang
 .row>div{flex:1;min-width:220px}
 .actions a{margin-right:12px;font-size:13px}
 .login{max-width:360px;margin:40px auto}
+.ed-tools{display:flex;align-items:center;gap:10px;margin:6px 0 2px}
+.ed-tools button{margin-top:0}
 .math-display{display:block;text-align:center;margin:20px 0;overflow-x:auto;overflow-y:hidden}
 .katex{font-size:1.08em}
 .math-error{color:var(--danger);font-family:ui-monospace,Menlo,monospace;font-size:13px}
@@ -664,6 +671,8 @@ ZH = {
     "The two new passwords do not match.": "两次输入的新密码不一致。",
     "Saved": "已保存", "Deleted": "已删除", "Password updated": "密码已更新",
     "Date": "日期", "Tags": "标签",
+    "Insert image": "插入图片",
+    "Paste or drop an image here, or click Insert image": "可直接粘贴或拖入图片，也可以点“插入图片”",
     "Dark mode": "暗色模式", "Light mode": "亮色模式", "Auto theme": "跟随系统",
 }
 
@@ -877,6 +886,50 @@ class Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length).decode("utf-8", "replace")
         return {k: v[0] for k, v in urllib.parse.parse_qs(raw, keep_blank_values=True).items()}
 
+    def multipart(self):
+        """Minimal multipart/form-data reader for image uploads."""
+        ctype = self.headers.get("Content-Type", "")
+        m = re.search(r'boundary="?([^";]+)"?', ctype)
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if not m or length <= 0 or length > MAX_UPLOAD:
+            return {}, {}
+        boundary = m.group(1).strip().encode()
+        body = self.rfile.read(length)
+        fields, files = {}, {}
+        for chunk in body.split(b"--" + boundary):
+            chunk = chunk.strip(b"\r\n")
+            if not chunk or chunk.endswith(b"--") or b"\r\n\r\n" not in chunk:
+                continue
+            head, data = chunk.split(b"\r\n\r\n", 1)
+            head_text = head.decode("utf-8", "replace")
+            name = re.search(r'name="([^"]*)"', head_text)
+            fname = re.search(r'filename="([^"]*)"', head_text)
+            if not name:
+                continue
+            if fname:
+                files[name.group(1)] = (fname.group(1), data.rstrip(b"\r\n"))
+            else:
+                fields[name.group(1)] = data.decode("utf-8", "replace").strip()
+        return fields, files
+
+    @staticmethod
+    def sniff_image(data):
+        if data.startswith(b"\x89PNG\r\n\x1a\n"):
+            return ".png"
+        if data.startswith(b"\xff\xd8\xff"):
+            return ".jpg"
+        if data[:6] in (b"GIF87a", b"GIF89a"):
+            return ".gif"
+        if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+            return ".webp"
+        head = data[:200].lstrip().lower()
+        if head.startswith(b"<svg") or head.startswith(b"<?xml"):
+            return ".svg"
+        return None
+
     def log_message(self, fmt, *args):
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
 
@@ -911,6 +964,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.view_feed(conn)
             if path.startswith("/static/"):
                 return self.view_static(path[8:])
+            if path.startswith("/media/"):
+                return self.view_media(path[7:])
             if path == "/healthz":
                 return self.send_html(200, "ok")
             if path == "/favicon.ico":
@@ -1102,6 +1157,25 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def view_media(self, name):
+        name = os.path.basename(urllib.parse.unquote(name))
+        target = os.path.join(MEDIA_DIR, name)
+        if not name or not os.path.isfile(target):
+            return self.send_html(404, "not found")
+        ext = os.path.splitext(name)[1].lower()
+        ctype = MEDIA_EXT.get(ext, "application/octet-stream")
+        with open(target, "rb") as fh:
+            data = fh.read()
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        if ext == ".svg":
+            self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
+        self.end_headers()
+        self.wfile.write(data)
+
     def view_login(self, conn, qs):
         error = self.t("Wrong username or password.") if qs.get("e") else ""
         body = (
@@ -1177,7 +1251,10 @@ class Handler(BaseHTTPRequestHandler):
             '<div><label>%s</label><select name="status">'
             '<option value="published"%s>%s</option><option value="draft"%s>%s</option>'
             "</select></div></div>"
-            '<label>%s</label><textarea name="body">%s</textarea>'
+            '<label>%s</label>'
+            '<div class="ed-tools"><button type="button" class="btn" id="jw-image-btn">%s</button>'
+            '<span class="meta">%s</span></div>'
+            '<textarea name="body" data-upload-url="%s" data-csrf="%s">%s</textarea>'
             '<button class="primary" type="submit">%s</button>'
             '<a class="btn" href="%s">%s</a>'
             "</form>"
@@ -1199,6 +1276,10 @@ class Handler(BaseHTTPRequestHandler):
                 ' selected' if (r and r["status"] == "draft") else "",
                 esc(self.t("draft")),
                 esc(self.t("Body (Markdown)")),
+                esc(self.t("Insert image")),
+                esc(self.t("Paste or drop an image here, or click Insert image")),
+                self.url("/admin/upload"),
+                esc(token),
                 "" if not r else esc(r["body"]),
                 esc(self.t("Save")),
                 self.url("/admin"),
@@ -1290,6 +1371,8 @@ class Handler(BaseHTTPRequestHandler):
         conn = self.db()
         try:
             user = self.current_user(conn)
+            if path == "/admin/upload":
+                return self.post_upload(conn, user)
             form = self.form()
 
             if path == "/admin/login":
@@ -1342,6 +1425,41 @@ class Handler(BaseHTTPRequestHandler):
               "jw_session=%s; Path=/; Max-Age=604800; HttpOnly; SameSite=Lax%s"
               % (value, "; Secure" if self.secure_cookie else ""))],
         )
+
+    def send_json(self, code, payload):
+        data = json.dumps(payload).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def post_upload(self, conn, user):
+        if not user:
+            return self.send_json(403, {"error": "login required"})
+        fields, files = self.multipart()
+        if not self.check_csrf(conn, user, fields.get("csrf", "")):
+            return self.send_json(403, {"error": "invalid csrf token"})
+        item = files.get("file")
+        if not item:
+            return self.send_json(400, {"error": "no file uploaded"})
+        data = item[1]
+        if not data:
+            return self.send_json(400, {"error": "empty file"})
+        ext = self.sniff_image(data)
+        if not ext:
+            return self.send_json(415, {"error": "only png/jpeg/gif/webp/svg images are accepted"})
+        os.makedirs(MEDIA_DIR, exist_ok=True)
+        name = "%s-%s%s" % (datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S"),
+                            secrets.token_hex(4), ext)
+        target = os.path.join(MEDIA_DIR, name)
+        with open(target, "wb") as fh:
+            fh.write(data)
+        return self.send_json(200, {
+            "url": self.url("/media/" + name),
+            "name": name,
+            "size": len(data),
+        })
 
     def post_save(self, conn, user, form):
         title = (form.get("title") or "").strip()

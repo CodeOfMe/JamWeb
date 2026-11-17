@@ -20,6 +20,9 @@ runtime that actually fits on a 32 MB router.
   long bars are dropped
 - Syntax highlighting for code fences via a bundled highlight.js
 - Light / dark / follow-system themes, and an English / 中文 UI switch
+- Image upload in the editor: paste, drag & drop or pick a file; the image is
+  stored under `JAMWEB_MEDIA` and served from `/media/<name>` (png/jpeg/gif/webp/svg,
+  8 MB limit)
 - Drafts vs published, tags, search, pagination
 - RSS feed at `/feed.xml`
 - Admin UI: dashboard, editor, settings, password change, one-click backup
@@ -59,6 +62,7 @@ Useful environment variables:
 | `JAMWEB_BASE` | URL prefix when behind a reverse proxy, e.g. `/blog` |
 | `JAMWEB_PUBLIC_URL` | absolute site URL used in the RSS feed |
 | `JAMWEB_SITE` | directory for `static/` assets (default `<app>/site`) |
+| `JAMWEB_MEDIA` | uploaded images (default `/etc/jamweb/media` on OpenWrt) |
 
 The bundled `site/static/vendor/` assets (KaTeX + highlight.js, ~700 KB) are
 copied by `install.sh`; the theme and language toggles in the header are
