@@ -416,7 +416,7 @@ def render_md(text, _items=None):
 
     def is_block_start(s):
         return bool(
-            re.match(r"^(#{1,6}\s|```|>|[-*+]\s|\d+\.\s|---+\s*$|\*\*\*\s*$)", s)
+            re.match(r"^(#{1,6}\s|```|>|[-*+]\s|\d+\.\s|\||---+\s*$|\*\*\*\s*$)", s)
         )
 
     while i < n:
@@ -450,6 +450,35 @@ def render_md(text, _items=None):
             level = len(m.group(1))
             out.append("<h%d>%s</h%d>" % (level, _inline(html.escape(m.group(2)), items), level))
             i += 1
+            continue
+
+        if line.lstrip().startswith("|") and i + 1 < n and re.match(
+                r"^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$", lines[i + 1]):
+            def cells(row):
+                row = row.strip()
+                if row.startswith("|"):
+                    row = row[1:]
+                if row.endswith("|"):
+                    row = row[:-1]
+                return [c.strip() for c in re.split(r"(?<!\\)\|", row)]
+
+            header = cells(line)
+            i += 2
+            body_rows = []
+            while i < n and lines[i].strip().startswith("|"):
+                body_rows.append(cells(lines[i]))
+                i += 1
+            parts = ["<table><thead><tr>"]
+            for c in header:
+                parts.append("<th>%s</th>" % _inline(html.escape(c), items))
+            parts.append("</tr></thead><tbody>")
+            for row in body_rows:
+                parts.append("<tr>")
+                for c in row:
+                    parts.append("<td>%s</td>" % _inline(html.escape(c), items))
+                parts.append("</tr>")
+            parts.append("</tbody></table>")
+            out.append("".join(parts))
             continue
 
         if re.match(r"^(---+|\*\*\*+)\s*$", line):
