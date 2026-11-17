@@ -37,6 +37,10 @@ mkdir -p "$DEST" "$(dirname "$DB")"
 cp "$SRC/app.py" "$DEST/app.py"
 chmod 755 "$DEST/app.py"
 
+# bundled front-end assets (KaTeX, highlight.js, jamweb.js)
+mkdir -p "$DEST/site"
+cp -r "$SRC/site/static" "$DEST/site/static"
+
 cp "$SRC/init.d/jamweb" /etc/init.d/jamweb
 chmod 755 /etc/init.d/jamweb
 

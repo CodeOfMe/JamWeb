@@ -12,6 +12,10 @@ runtime that actually fits on a 32 MB router.
 
 - SQLite storage (WAL mode), single file, trivial to back up
 - Write posts in Markdown (headings, lists, quotes, code fences, links, images)
+- LaTeX math (`$...$`, `$$...$$`, `\(...\)`, `\[...\]`) rendered by a bundled
+  KaTeX, so formulas never get mangled by Markdown
+- Syntax highlighting for code fences via a bundled highlight.js
+- Light / dark / follow-system themes, and an English / 中文 UI switch
 - Drafts vs published, tags, search, pagination
 - RSS feed at `/feed.xml`
 - Admin UI: dashboard, editor, settings, password change, one-click backup
@@ -50,7 +54,11 @@ Useful environment variables:
 | `JAMWEB_USER` / `JAMWEB_PASSWORD` | admin account created on install |
 | `JAMWEB_BASE` | URL prefix when behind a reverse proxy, e.g. `/blog` |
 | `JAMWEB_PUBLIC_URL` | absolute site URL used in the RSS feed |
-| `JAMWEB_SITE` | directory for `static/` assets |
+| `JAMWEB_SITE` | directory for `static/` assets (default `<app>/site`) |
+
+The bundled `site/static/vendor/` assets (KaTeX + highlight.js, ~700 KB) are
+copied by `install.sh`; the theme and language toggles in the header are
+plain links that store a cookie, so pages stay fully server-rendered.
 
 Example: serve under `http://router/blog/` through nginx:
 

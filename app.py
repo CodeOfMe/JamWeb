@@ -205,6 +205,8 @@ def parse_session(secret, value, now=None):
 # markdown (small, safe subset)
 # --------------------------------------------------------------------------
 SAFE_URL = re.compile(r"^(?:https?://|mailto:|/|#|\.{0,2}/)")
+MATH_TOKEN = "\x00M%d\x00"
+INLINE_MATH = re.compile(r"\\\((.+?)\\\)|\$(?![\s$])([^$\n]+?)(?<!\\)\$(?![\d$])")
 
 
 def safe_url(u):
@@ -214,7 +216,18 @@ def safe_url(u):
     return "#"
 
 
-def _inline(s):
+def _math_html(items, idx):
+    tex, display = items[idx]
+    return '<span class="math %s" data-tex="%s"%s></span>' % (
+        "math-display" if display else "math-inline",
+        html.escape(tex, quote=True),
+        ' data-display="1"' if display else "",
+    )
+
+
+def _inline(s, items=()):
+    if items:
+        s = re.sub(r"\x00M(\d+)\x00", lambda m: _math_html(items, int(m.group(1))), s)
     s = re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
     s = re.sub(
         r"!\[([^\]]*)\]\(([^)\s]+)\)",
@@ -232,8 +245,85 @@ def _inline(s):
     return s
 
 
-def render_md(text):
+def _extract_math(text):
+    """Pull TeX out of the source before Markdown touches it.
+
+    Handles $$...$$ (possibly multi-line), \\[...\\], $...$ and \\(...\\) while
+    leaving fenced code blocks alone. Each formula becomes a token that the
+    block/inline renderer turns into a <span class="math"> for KaTeX.
+    """
+    items = []
+    lines = text.split("\n")
+    out = []
+    in_fence = False
+    i = 0
+
+    def add(tex, display):
+        tex = tex.strip()
+        if not tex:
+            return ""
+        items.append((tex, display))
+        return MATH_TOKEN % (len(items) - 1)
+
+    while i < len(lines):
+        line = lines[i]
+        if re.match(r"^```", line):
+            in_fence = not in_fence
+            out.append(line)
+            i += 1
+            continue
+        if in_fence:
+            out.append(line)
+            i += 1
+            continue
+
+        stripped = line.strip()
+        m = re.match(r"^\$\$(.+?)\$\$$", stripped)
+        if m:
+            out.append(add(m.group(1), True))
+            i += 1
+            continue
+        m = re.match(r"^\\\[(.+?)\\\]$", stripped)
+        if m:
+            out.append(add(m.group(1), True))
+            i += 1
+            continue
+        if "$$" in line and line.count("$$") == 1:
+            start = line.find("$$")
+            buf = [line[start + 2:]]
+            i += 1
+            rest = ""
+            while i < len(lines):
+                if "$$" in lines[i]:
+                    pos = lines[i].find("$$")
+                    buf.append(lines[i][:pos])
+                    rest = lines[i][pos + 2:]
+                    i += 1
+                    break
+                buf.append(lines[i])
+                i += 1
+            out.append(add("\n".join(buf), True))
+            if rest.strip():
+                out.append(rest)
+            continue
+
+        def repl(m):
+            tex = m.group(1) or m.group(2) or ""
+            if not re.search(r"[A-Za-z\\{}^_]", tex):
+                return m.group(0)
+            return add(tex, False)
+
+        out.append(INLINE_MATH.sub(repl, line))
+        i += 1
+    return "\n".join(out), items
+
+
+def render_md(text, _items=None):
     text = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    if _items is None:
+        text, items = _extract_math(text)
+    else:
+        items = _items
     lines = text.split("\n")
     out = []
     i = 0
@@ -248,6 +338,12 @@ def render_md(text):
         line = lines[i]
 
         if not line.strip():
+            i += 1
+            continue
+
+        tok = re.fullmatch(r"\x00M(\d+)\x00", line.strip())
+        if tok:
+            out.append(_math_html(items, int(tok.group(1))))
             i += 1
             continue
 
@@ -267,7 +363,7 @@ def render_md(text):
         m = re.match(r"^(#{1,6})\s+(.*)$", line)
         if m:
             level = len(m.group(1))
-            out.append("<h%d>%s</h%d>" % (level, _inline(html.escape(m.group(2))), level))
+            out.append("<h%d>%s</h%d>" % (level, _inline(html.escape(m.group(2)), items), level))
             i += 1
             continue
 
@@ -281,30 +377,30 @@ def render_md(text):
             while i < n and lines[i].startswith(">"):
                 buf.append(re.sub(r"^>\s?", "", lines[i]))
                 i += 1
-            out.append("<blockquote>%s</blockquote>" % render_md("\n".join(buf)))
+            out.append("<blockquote>%s</blockquote>" % render_md("\n".join(buf), items))
             continue
 
         if re.match(r"^[-*+]\s+", line):
-            items = []
+            items_u = []
             while i < n and re.match(r"^[-*+]\s+", lines[i]):
-                items.append("<li>%s</li>" % _inline(html.escape(re.sub(r"^[-*+]\s+", "", lines[i]))))
+                items_u.append("<li>%s</li>" % _inline(html.escape(re.sub(r"^[-*+]\s+", "", lines[i])), items))
                 i += 1
-            out.append("<ul>%s</ul>" % "".join(items))
+            out.append("<ul>%s</ul>" % "".join(items_u))
             continue
 
         if re.match(r"^\d+\.\s+", line):
-            items = []
+            items_o = []
             while i < n and re.match(r"^\d+\.\s+", lines[i]):
-                items.append("<li>%s</li>" % _inline(html.escape(re.sub(r"^\d+\.\s+", "", lines[i]))))
+                items_o.append("<li>%s</li>" % _inline(html.escape(re.sub(r"^\d+\.\s+", "", lines[i])), items))
                 i += 1
-            out.append("<ol>%s</ol>" % "".join(items))
+            out.append("<ol>%s</ol>" % "".join(items_o))
             continue
 
         para = []
         while i < n and lines[i].strip() and not is_block_start(lines[i]):
             para.append(lines[i])
             i += 1
-        out.append("<p>%s</p>" % _inline(html.escape(" ".join(para))))
+        out.append("<p>%s</p>" % _inline(html.escape(" ".join(para)), items))
 
     return "\n".join(out)
 
@@ -325,79 +421,184 @@ def esc(v):
 
 CSS = """
 *{box-sizing:border-box}
+:root{
+  --bg:#fff;--fg:#1f2328;--muted:#6a737d;--line:#eaecef;--panel:#f6f8fa;--panel2:#f1f3f5;
+  --link:#0969da;--strong:#1f2328;--code-bg:#f6f8fa;--inline-bg:#f1f3f5;--quote:#57606a;
+  --btn-bg:#f6f8fa;--btn-line:#d0d7de;--primary:#1f883d;--primary-line:#1a7f37;
+  --danger:#cf222e;--flash-bg:#ddf4ff;--flash-line:#b6e3ff;--err-bg:#fff5f5;--err-fg:#a40e26;--err-line:#ffcecb;
+  --hl-key:#cf222e;--hl-str:#0a3069;--hl-com:#6e7781;--hl-num:#0550ae;--hl-fn:#8250df;
+  --hl-type:#953800;--hl-attr:#116329;--hl-add:#116329;--hl-del:#82071e;--shadow:rgba(0,0,0,.06)
+}
+:root[data-theme="dark"]{
+  --bg:#0d1117;--fg:#e6edf3;--muted:#8b949e;--line:#30363d;--panel:#161b22;--panel2:#21262d;
+  --link:#4493f8;--strong:#f0f6fc;--code-bg:#161b22;--inline-bg:#21262d;--quote:#8b949e;
+  --btn-bg:#21262d;--btn-line:#30363d;--primary:#238636;--primary-line:#2ea043;
+  --danger:#f85149;--flash-bg:#0c2d6b;--flash-line:#1f4f9c;--err-bg:#3d1418;--err-fg:#ffb3b3;--err-line:#6e2228;
+  --hl-key:#ff7b72;--hl-str:#a5d6ff;--hl-com:#8b949e;--hl-num:#79c0ff;--hl-fn:#d2a8ff;
+  --hl-type:#ffa657;--hl-attr:#7ee787;--hl-add:#7ee787;--hl-del:#ffa198;--shadow:rgba(0,0,0,.4)
+}
+@media (prefers-color-scheme: dark){
+  :root[data-theme="auto"]{
+    --bg:#0d1117;--fg:#e6edf3;--muted:#8b949e;--line:#30363d;--panel:#161b22;--panel2:#21262d;
+    --link:#4493f8;--strong:#f0f6fc;--code-bg:#161b22;--inline-bg:#21262d;--quote:#8b949e;
+    --btn-bg:#21262d;--btn-line:#30363d;--primary:#238636;--primary-line:#2ea043;
+    --danger:#f85149;--flash-bg:#0c2d6b;--flash-line:#1f4f9c;--err-bg:#3d1418;--err-fg:#ffb3b3;--err-line:#6e2228;
+    --hl-key:#ff7b72;--hl-str:#a5d6ff;--hl-com:#8b949e;--hl-num:#79c0ff;--hl-fn:#d2a8ff;
+    --hl-type:#ffa657;--hl-attr:#7ee787;--hl-add:#7ee787;--hl-del:#ffa198;--shadow:rgba(0,0,0,.4)
+  }
+}
 body{margin:0;font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,
- "PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;color:#1f2328;background:#fff}
-a{color:#0969da;text-decoration:none}a:hover{text-decoration:underline}
+ "PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;color:var(--fg);background:var(--bg);
+ transition:background .15s,color .15s}
+a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}
 header.site,main,footer.site{max-width:760px;margin:0 auto;padding:0 20px}
 header.site{padding-top:28px;padding-bottom:8px}
-header.site h1{margin:0;font-size:26px}
-header.site .tag{color:#6a737d;font-size:14px;margin-top:4px}
+header.site .bar{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+header.site h1{margin:0;font-size:26px;color:var(--strong)}
+header.site .tag{color:var(--muted);font-size:14px;margin-top:4px}
+.switches{display:flex;gap:8px;font-size:13px;flex-shrink:0}
+.switches a{padding:4px 10px;border:1px solid var(--btn-line);border-radius:999px;background:var(--btn-bg);
+ color:var(--fg);white-space:nowrap}
+.switches a:hover{text-decoration:none;border-color:var(--link)}
 nav.top{margin-top:14px;font-size:14px}
-nav.top a{margin-right:14px;color:#57606a}
+nav.top a{margin-right:14px;color:var(--muted)}
 main{padding-top:22px;padding-bottom:40px}
-article.post{border-bottom:1px solid #eaecef;padding:18px 0}
+article.post{border-bottom:1px solid var(--line);padding:18px 0}
 article.post:last-child{border-bottom:0}
 article.post h2{margin:0 0 4px;font-size:20px}
-article.post h2 a{color:#1f2328}
-.meta{color:#6a737d;font-size:13px}
-.meta .taglink{background:#f1f3f5;border-radius:4px;padding:1px 6px;margin-right:6px}
-.summary{color:#444;margin:8px 0 0}
-h1.title{font-size:30px;margin:0 0 6px}
-pre{background:#f6f8fa;border-radius:8px;padding:14px;overflow:auto;font-size:13.5px}
-code{background:#f1f3f5;border-radius:4px;padding:1px 4px;font-size:90%}
-pre code{background:none;padding:0}
-blockquote{margin:16px 0;padding:2px 16px;border-left:4px solid #dfe2e5;color:#57606a}
+article.post h2 a{color:var(--strong)}
+.meta{color:var(--muted);font-size:13px}
+.meta .taglink{background:var(--panel2);border-radius:4px;padding:1px 6px;margin-right:6px}
+.summary{color:var(--fg);opacity:.85;margin:8px 0 0}
+h1.title{font-size:30px;margin:0 0 6px;color:var(--strong)}
+pre{background:var(--code-bg);border:1px solid var(--line);border-radius:8px;padding:14px;overflow:auto;font-size:13.5px}
+code{background:var(--inline-bg);border-radius:4px;padding:1px 4px;font-size:90%}
+pre code{background:none;padding:0;border:0}
+blockquote{margin:16px 0;padding:2px 16px;border-left:4px solid var(--line);color:var(--quote)}
 img{max-width:100%;height:auto;border-radius:6px}
-hr{border:0;border-top:1px solid #eaecef;margin:24px 0}
+hr{border:0;border-top:1px solid var(--line);margin:24px 0}
 table{width:100%;border-collapse:collapse;font-size:14px}
-th,td{text-align:left;border-bottom:1px solid #eaecef;padding:8px 6px}
-footer.site{color:#6a737d;font-size:13px;padding:24px 20px 40px;border-top:1px solid #eaecef}
+th,td{text-align:left;border-bottom:1px solid var(--line);padding:8px 6px}
+footer.site{color:var(--muted);font-size:13px;padding:24px 20px 40px;border-top:1px solid var(--line)}
 .pager{display:flex;justify-content:space-between;margin-top:24px;font-size:14px}
 form{margin:0}
-label{display:block;font-size:13px;color:#57606a;margin:14px 0 5px}
+label{display:block;font-size:13px;color:var(--muted);margin:14px 0 5px}
 input[type=text],input[type=password],input[type=search],select,textarea{
- width:100%;font:inherit;padding:8px 10px;border:1px solid #d0d7de;border-radius:6px;background:#fff}
+ width:100%;font:inherit;padding:8px 10px;border:1px solid var(--btn-line);border-radius:6px;
+ background:var(--bg);color:var(--fg)}
 textarea{min-height:340px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13.5px}
 button,.btn{display:inline-block;margin-top:16px;margin-right:8px;padding:8px 16px;font:inherit;
- border:1px solid #d0d7de;border-radius:6px;background:#f6f8fa;cursor:pointer}
-button.primary{background:#1f883d;border-color:#1a7f37;color:#fff}
-button.danger{background:#fff;border-color:#cf222e;color:#cf222e}
-.flash{background:#ddf4ff;border:1px solid #b6e3ff;border-radius:6px;padding:10px 12px;margin-bottom:16px}
-.err{background:#fff5f5;border:1px solid #ffcecb;color:#a40e26;border-radius:6px;padding:10px 12px;margin-bottom:16px}
+ border:1px solid var(--btn-line);border-radius:6px;background:var(--btn-bg);color:var(--fg);cursor:pointer}
+button.primary{background:var(--primary);border-color:var(--primary-line);color:#fff}
+button.danger{background:transparent;border-color:var(--danger);color:var(--danger)}
+.flash{background:var(--flash-bg);border:1px solid var(--flash-line);border-radius:6px;padding:10px 12px;margin-bottom:16px}
+.err{background:var(--err-bg);border:1px solid var(--err-line);color:var(--err-fg);border-radius:6px;
+ padding:10px 12px;margin-bottom:16px}
 .row{display:flex;gap:16px;flex-wrap:wrap}
 .row>div{flex:1;min-width:220px}
 .actions a{margin-right:12px;font-size:13px}
 .login{max-width:360px;margin:40px auto}
+.math-display{display:block;text-align:center;margin:20px 0;overflow-x:auto;overflow-y:hidden}
+.katex{font-size:1.08em}
+.math-error{color:var(--danger);font-family:ui-monospace,Menlo,monospace;font-size:13px}
+.hljs-keyword,.hljs-selector-tag,.hljs-literal{color:var(--hl-key)}
+.hljs-string,.hljs-regexp,.hljs-addition{color:var(--hl-str)}
+.hljs-comment,.hljs-quote{color:var(--hl-com);font-style:italic}
+.hljs-number,.hljs-built_in,.hljs-builtin-name{color:var(--hl-num)}
+.hljs-title,.hljs-section,.hljs-function .hljs-title{color:var(--hl-fn)}
+.hljs-type,.hljs-class .hljs-title{color:var(--hl-type)}
+.hljs-attr,.hljs-attribute,.hljs-variable,.hljs-template-variable{color:var(--hl-attr)}
+.hljs-deletion{color:var(--hl-del)}
+.hljs-emphasis{font-style:italic}.hljs-strong{font-weight:600}
 """
 
 
-def layout(srv, conn, title, body, user=None, flash="", error="", url=None):
+ZH = {
+    "Home": "首页", "Feed": "订阅", "Admin": "管理", "New post": "写文章",
+    "View site": "查看站点", "Log out": "退出", "Log in": "登录",
+    "Posts": "文章", "total": "共", "Settings": "设置", "Password": "密码",
+    "Backup": "备份", "Edit": "编辑", "Edit post": "编辑文章", "New post": "写文章",
+    "Cancel": "取消", "Delete": "删除", "Save": "保存", "Title": "标题",
+    "Slug": "别名", "Tags (comma separated)": "标签（逗号分隔）",
+    "Status": "状态", "Body (Markdown)": "正文（Markdown）",
+    "published": "已发布", "draft": "草稿",
+    "Administrator": "管理员登录", "Username": "用户名",
+    "Visitors do not need to log in: the public site is the": "访客无需登录，公开站点就是",
+    "home page": "首页", "This form is for the administrator only.": "此表单仅供管理员使用。",
+    "Wrong username or password.": "用户名或密码错误。",
+    "Too many attempts. Try again shortly.": "尝试次数过多，请稍后再试。",
+    "Site title": "站点名称", "Tagline": "副标题", "Footer": "页脚",
+    "Posts per page (1-50)": "每页文章数（1-50）",
+    "Hide the Admin link on the public site (visitors then reach it only via /admin)":
+        "在公开页面隐藏“管理”入口（之后只能通过 /admin 访问）",
+    "Change password": "修改密码", "Current password": "当前密码",
+    "New password (min 8 chars)": "新密码（至少 8 位）",
+    "Repeat new password": "重复新密码", "Update": "更新",
+    "Search": "搜索", "Search posts": "搜索文章", "result(s) for": "条结果：",
+    "No posts yet.": "还没有文章。", "No posts with that tag.": "该标签下没有文章。",
+    "Not found": "未找到", "Nothing here.": "这里什么都没有。",
+    "Newer": "较新", "Older": "较早", "page": "第", "of": "/", "Tag": "标签",
+    "Log in to continue.": "请登录后继续。",
+    "Bad request": "请求无效", "Invalid or expired form token.": "表单令牌无效或已过期。",
+    "Title is required.": "标题不能为空。",
+    "Slug must be lowercase letters, digits or dashes.": "别名只能用小写字母、数字和连字符。",
+    "Current password is wrong.": "当前密码不正确。",
+    "New password must be at least 8 characters.": "新密码至少 8 位。",
+    "The two new passwords do not match.": "两次输入的新密码不一致。",
+    "Saved": "已保存", "Deleted": "已删除", "Password updated": "密码已更新",
+    "Date": "日期", "Tags": "标签",
+    "Dark mode": "暗色模式", "Light mode": "亮色模式", "Auto theme": "跟随系统",
+}
+
+
+def tr(lang, text):
+    return ZH.get(text, text) if lang == "zh" else text
+
+
+THEME_NEXT = {"auto": "light", "light": "dark", "dark": "auto"}
+THEME_ICON = {"auto": "🌓", "light": "☀️", "dark": "🌙"}
+
+
+def layout(srv, conn, title, body, user=None, flash="", error="", url=None,
+           lang="en", theme="auto"):
+    T = lambda s: tr(lang, s)
     site = get_setting(conn, "site_title", "JamWeb")
     tagline = get_setting(conn, "tagline", "")
     footer = get_setting(conn, "footer", "")
     u = url or (lambda p: srv.base + p)
     hide_admin = get_setting(conn, "hide_admin_link", "0") == "1"
-    nav = ['<a href="%s">Home</a>' % u("/")]
-    nav.append('<a href="%s">Feed</a>' % u("/feed.xml"))
+    nav = ['<a href="%s">%s</a>' % (u("/"), esc(T("Home")))]
+    nav.append('<a href="%s">%s</a>' % (u("/feed.xml"), esc(T("Feed"))))
     if user:
-        nav.append('<a href="%s">Admin</a>' % u("/admin"))
-        nav.append('<a href="%s">New post</a>' % u("/admin/edit?new=1"))
-        nav.append('<a href="%s">View site</a>' % u("/"))
-        nav.append('<a href="%s">Log out</a>' % u("/admin/logout"))
+        nav.append('<a href="%s">%s</a>' % (u("/admin"), esc(T("Admin"))))
+        nav.append('<a href="%s">%s</a>' % (u("/admin/edit?new=1"), esc(T("New post"))))
+        nav.append('<a href="%s">%s</a>' % (u("/"), esc(T("View site"))))
+        nav.append('<a href="%s">%s</a>' % (u("/admin/logout"), esc(T("Log out"))))
     elif not hide_admin:
-        nav.append('<a href="%s">Admin</a>' % u("/admin"))
+        nav.append('<a href="%s">%s</a>' % (u("/admin"), esc(T("Admin"))))
+
+    nxt = THEME_NEXT.get(theme, "auto")
+    other = "zh" if lang == "en" else "en"
+    switches = (
+        '<a class="chip" href="?theme=%s" title="%s">%s</a>'
+        '<a class="chip" href="?lang=%s">%s</a>'
+        % (nxt, esc(T("Auto theme")), THEME_ICON.get(theme, "🌓"), other, "中文" if other == "zh" else "EN")
+    )
     head = site if not title else "%s · %s" % (esc(title), esc(site))
     parts = [
         "<!doctype html>",
-        '<html lang="en"><head><meta charset="utf-8">',
+        '<html lang="%s" data-theme="%s"><head><meta charset="utf-8">' % (lang, theme),
         '<meta name="viewport" content="width=device-width,initial-scale=1">',
         "<title>%s</title>" % head,
+        '<link rel="stylesheet" href="%s">' % u("/static/vendor/katex/katex.min.css"),
         "<style>%s</style>" % CSS,
         "</head><body>",
-        '<header class="site"><h1><a href="%s" style="color:inherit">%s</a></h1>' % (u("/"), esc(site)),
+        '<header class="site"><div class="bar"><div>',
+        '<h1><a href="%s" style="color:inherit">%s</a></h1>' % (u("/"), esc(site)),
     ]
     if tagline:
         parts.append('<div class="tag">%s</div>' % esc(tagline))
+    parts.append('</div><div class="switches">%s</div></div>' % switches)
     parts.append('<nav class="top">%s</nav></header>' % "".join(nav))
     parts.append("<main>")
     if flash:
@@ -407,6 +608,9 @@ def layout(srv, conn, title, body, user=None, flash="", error="", url=None):
     parts.append(body)
     parts.append("</main>")
     parts.append('<footer class="site">%s</footer>' % esc(footer))
+    parts.append('<script defer src="%s"></script>' % u("/static/vendor/katex/katex.min.js"))
+    parts.append('<script defer src="%s"></script>' % u("/static/vendor/hljs/highlight.min.js"))
+    parts.append('<script defer src="%s"></script>' % u("/static/jamweb.js"))
     parts.append("</body></html>")
     return "".join(parts)
 
@@ -437,6 +641,31 @@ class Handler(BaseHTTPRequestHandler):
 
     def db(self):
         return connect(self.srv.db)
+
+    def cookie(self, name):
+        raw = self.headers.get("Cookie")
+        if not raw:
+            return ""
+        jar = cookies.SimpleCookie()
+        try:
+            jar.load(raw)
+        except cookies.CookieError:
+            return ""
+        morsel = jar.get(name)
+        return morsel.value if morsel else ""
+
+    @property
+    def lang(self):
+        value = self.cookie("jw_lang")
+        return value if value in ("en", "zh") else "en"
+
+    @property
+    def theme(self):
+        value = self.cookie("jw_theme")
+        return value if value in ("light", "dark", "auto") else "auto"
+
+    def t(self, text):
+        return tr(self.lang, text)
 
     def secret(self, conn):
         return get_setting(conn, "secret") or os.environ.get("JAMWEB_SECRET", "")
@@ -503,11 +732,14 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def page(self, conn, title, body, user=None, code=200, flash="", error=""):
-        self.send_html(code, layout(self.srv, conn, title, body, user=user, flash=flash, error=error,
-                                    url=self.url))
+        self.send_html(code, layout(self.srv, conn, title, body, user=user,
+                                    flash=tr(self.lang, flash), error=tr(self.lang, error),
+                                    url=self.url, lang=self.lang, theme=self.theme))
 
     def not_found(self, conn, user=None):
-        self.page(conn, "Not found", "<h1 class='title'>404</h1><p>Nothing here.</p>", user=user, code=404)
+        self.page(conn, self.t("Not found"),
+                  "<h1 class='title'>404</h1><p>%s</p>" % esc(self.t("Nothing here.")),
+                  user=user, code=404)
 
     def parse(self):
         raw = self.path
@@ -534,6 +766,19 @@ class Handler(BaseHTTPRequestHandler):
     # ---- GET -------------------------------------------------------------
     def do_GET(self):
         path, qs = self.parse()
+        # language / theme switches persist in cookies, then redirect back
+        extra = []
+        if qs.get("lang", [""])[0] in ("en", "zh"):
+            extra.append(("Set-Cookie", "jw_lang=%s; Path=/; Max-Age=31536000; SameSite=Lax"
+                          % qs["lang"][0]))
+            qs.pop("lang")
+        if qs.get("theme", [""])[0] in ("light", "dark", "auto"):
+            extra.append(("Set-Cookie", "jw_theme=%s; Path=/; Max-Age=31536000; SameSite=Lax"
+                          % qs["theme"][0]))
+            qs.pop("theme")
+        if extra:
+            rest = urllib.parse.urlencode({k: v[0] for k, v in qs.items()})
+            return self.redirect(self.url(path) + ("?" + rest if rest else ""), extra)
         conn = self.db()
         try:
             user = self.current_user(conn)
@@ -588,7 +833,7 @@ class Handler(BaseHTTPRequestHandler):
         ).fetchall()
         body = []
         if not rows:
-            body.append("<p>No posts yet.</p>")
+            body.append("<p>%s</p>" % esc(self.t("No posts yet.")))
         for r in rows:
             body.append(
                 '<article class="post"><h2><a href="%s">%s</a></h2>'
@@ -633,7 +878,7 @@ class Handler(BaseHTTPRequestHandler):
             "ORDER BY created_at DESC, id DESC",
             ("%," + tag.lower() + ",%",),
         ).fetchall()
-        body = ['<h1 class="title">Tag: %s</h1>' % esc(tag)]
+        body = ['<h1 class="title">%s: %s</h1>' % (esc(self.t("Tag")), esc(tag))]
         for r in rows:
             body.append(
                 '<article class="post"><h2><a href="%s">%s</a></h2>'
@@ -646,16 +891,16 @@ class Handler(BaseHTTPRequestHandler):
                 )
             )
         if not rows:
-            body.append("<p>No posts with that tag.</p>")
+            body.append("<p>%s</p>" % esc(self.t("No posts with that tag.")))
         self.page(conn, "Tag: " + tag, "".join(body), user=user)
 
     def view_search(self, conn, qs, user):
         q = (qs.get("q") or [""])[0].strip()
         body = [
-            '<h1 class="title">Search</h1>',
+            '<h1 class="title">%s</h1>' % esc(self.t("Search")),
             '<form method="get" action="%s"><input type="search" name="q" value="%s" '
-            'placeholder="Search posts"><button class="primary" type="submit">Search</button></form>'
-            % (self.url("/search"), esc(q)),
+            'placeholder="%s"><button class="primary" type="submit">%s</button></form>'
+            % (self.url("/search"), esc(q), esc(self.t("Search posts")), esc(self.t("Search"))),
         ]
         if q:
             like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
@@ -664,7 +909,7 @@ class Handler(BaseHTTPRequestHandler):
                 "OR body LIKE ? ESCAPE '\\') ORDER BY created_at DESC",
                 (like, like),
             ).fetchall()
-            body.append("<p class='meta'>%d result(s) for “%s”</p>" % (len(rows), esc(q)))
+            body.append("<p class='meta'>%d %s“%s”</p>" % (len(rows), esc(self.t("result(s) for")), esc(q)))
             for r in rows:
                 body.append(
                     '<article class="post"><h2><a href="%s">%s</a></h2>'
@@ -711,13 +956,14 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def view_static(self, name):
-        base = os.path.join(SITE_DIR, "static")
-        target = os.path.join(base, os.path.basename(name))
-        if not os.path.isfile(target):
+        base = os.path.abspath(os.path.join(SITE_DIR, "static"))
+        target = os.path.abspath(os.path.join(base, urllib.parse.unquote(name)))
+        if not (target == base or target.startswith(base + os.sep)) or not os.path.isfile(target):
             return self.send_html(404, "not found")
         ctype = {
             ".css": "text/css; charset=utf-8",
             ".js": "application/javascript",
+            ".mjs": "application/javascript",
             ".png": "image/png",
             ".jpg": "image/jpeg",
             ".jpeg": "image/jpeg",
@@ -725,6 +971,10 @@ class Handler(BaseHTTPRequestHandler):
             ".svg": "image/svg+xml",
             ".ico": "image/x-icon",
             ".txt": "text/plain; charset=utf-8",
+            ".woff2": "font/woff2",
+            ".woff": "font/woff",
+            ".ttf": "font/ttf",
+            ".map": "application/json",
         }.get(os.path.splitext(target)[1].lower(), "application/octet-stream")
         with open(target, "rb") as fh:
             data = fh.read()
@@ -736,18 +986,24 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def view_login(self, conn, qs):
-        error = "Wrong username or password." if qs.get("e") else ""
+        error = self.t("Wrong username or password.") if qs.get("e") else ""
         body = (
-            '<div class="login"><h1 class="title">Administrator</h1>'
-            '<p class="meta">Visitors do not need to log in: the public site is the '
-            '<a href="%s">home page</a>. This form is for the administrator only.</p>'
+            '<div class="login"><h1 class="title">%s</h1>'
+            '<p class="meta">%s <a href="%s">%s</a>. %s</p>'
             '<form method="post" action="%s">'
-            '<label>Username</label><input type="text" name="username" autocomplete="username" autofocus>'
-            '<label>Password</label><input type="password" name="password" autocomplete="current-password">'
-            '<button class="primary" type="submit">Log in</button></form></div>'
-            % (self.url("/"), self.url("/admin/login"))
+            '<label>%s</label><input type="text" name="username" autocomplete="username" autofocus>'
+            '<label>%s</label><input type="password" name="password" autocomplete="current-password">'
+            '<button class="primary" type="submit">%s</button></form></div>'
+            % (
+                esc(self.t("Administrator")),
+                esc(self.t("Visitors do not need to log in: the public site is the")),
+                self.url("/"), esc(self.t("home page")),
+                esc(self.t("This form is for the administrator only.")),
+                self.url("/admin/login"),
+                esc(self.t("Username")), esc(self.t("Password")), esc(self.t("Log in")),
+            )
         )
-        self.page(conn, "Log in", body, code=200 if not error else 401, error=error)
+        self.page(conn, self.t("Log in"), body, code=200 if not error else 401, error=error)
 
     def view_admin(self, conn, user, qs):
         rows = conn.execute("SELECT * FROM posts ORDER BY created_at DESC, id DESC").fetchall()
@@ -759,7 +1015,7 @@ class Handler(BaseHTTPRequestHandler):
                 % (
                     self.url("/p/" + urllib.parse.quote(r["slug"])),
                     esc(r["title"]),
-                    "" if r["status"] == "published" else " <em>(draft)</em>",
+                    "" if r["status"] == "published" else " <em>(%s)</em>" % esc(self.t("draft")),
                     self.date_html(r["created_at"]),
                     esc(r["tags"]),
                     esc(r["status"]),
@@ -767,22 +1023,23 @@ class Handler(BaseHTTPRequestHandler):
                 )
             )
         body = (
-            '<h1 class="title">Posts</h1><p class="meta">%d total</p>'
-            '<table><thead><tr><th>Title</th><th>Date</th><th>Tags</th><th>Status</th><th></th></tr></thead>'
+            '<h1 class="title">%s</h1><p class="meta">%d %s</p>'
+            '<table><thead><tr><th>%s</th><th>%s</th><th>%s</th><th>%s</th><th></th></tr></thead>'
             "<tbody>%s</tbody></table>"
-            '<div class="btn-row"><a class="btn" href="%s">New post</a>'
-            '<a class="btn" href="%s">Settings</a><a class="btn" href="%s">Password</a>'
-            '<a class="btn" href="%s">Backup</a></div>'
+            '<div class="btn-row"><a class="btn" href="%s">%s</a>'
+            '<a class="btn" href="%s">%s</a><a class="btn" href="%s">%s</a>'
+            '<a class="btn" href="%s">%s</a></div>'
             % (
-                len(rows),
-                "".join(trs) or "<tr><td colspan='5'>No posts yet.</td></tr>",
-                self.url("/admin/edit?new=1"),
-                self.url("/admin/settings"),
-                self.url("/admin/password"),
-                self.url("/admin/backup"),
+                esc(self.t("Posts")), len(rows), esc(self.t("total")),
+                esc(self.t("Title")), esc(self.t("Date")), esc(self.t("Tags")), esc(self.t("Status")),
+                "".join(trs) or "<tr><td colspan='5'>%s</td></tr>" % esc(self.t("No posts yet.")),
+                self.url("/admin/edit?new=1"), esc(self.t("New post")),
+                self.url("/admin/settings"), esc(self.t("Settings")),
+                self.url("/admin/password"), esc(self.t("Password")),
+                self.url("/admin/backup"), esc(self.t("Backup")),
             )
         )
-        self.page(conn, "Admin", body, user=user, flash=(qs.get("ok") or [""])[0])
+        self.page(conn, self.t("Admin"), body, user=user, flash=(qs.get("ok") or [""])[0])
 
     def view_edit(self, conn, user, qs):
         pid = (qs.get("id") or [""])[0]
@@ -796,76 +1053,100 @@ class Handler(BaseHTTPRequestHandler):
             '<h1 class="title">%s</h1><form method="post" action="%s">'
             '<input type="hidden" name="csrf" value="%s">'
             '<input type="hidden" name="id" value="%s">'
-            '<label>Title</label><input type="text" name="title" value="%s" required>'
-            '<div class="row"><div><label>Slug</label><input type="text" name="slug" value="%s" '
+            '<label>%s</label><input type="text" name="title" value="%s" required>'
+            '<div class="row"><div><label>%s</label><input type="text" name="slug" value="%s" '
             'placeholder="auto from title"></div>'
-            '<div><label>Tags (comma separated)</label><input type="text" name="tags" value="%s"></div>'
-            '<div><label>Status</label><select name="status">'
-            '<option value="published"%s>published</option><option value="draft"%s>draft</option>'
+            '<div><label>%s</label><input type="text" name="tags" value="%s"></div>'
+            '<div><label>%s</label><select name="status">'
+            '<option value="published"%s>%s</option><option value="draft"%s>%s</option>'
             "</select></div></div>"
-            '<label>Body (Markdown)</label><textarea name="body">%s</textarea>'
-            '<button class="primary" type="submit">Save</button>'
-            '<a class="btn" href="%s">Cancel</a>'
+            '<label>%s</label><textarea name="body">%s</textarea>'
+            '<button class="primary" type="submit">%s</button>'
+            '<a class="btn" href="%s">%s</a>'
             "</form>"
             "%s"
             % (
-                "Edit post" if r else "New post",
+                esc(self.t("Edit post") if r else self.t("New post")),
                 self.url("/admin/save"),
                 esc(token),
                 "" if not r else r["id"],
+                esc(self.t("Title")),
                 "" if not r else esc(r["title"]),
+                esc(self.t("Slug")),
                 "" if not r else esc(r["slug"]),
+                esc(self.t("Tags (comma separated)")),
                 "" if not r else esc(r["tags"]),
+                esc(self.t("Status")),
                 ' selected' if (r and r["status"] == "published") else "",
+                esc(self.t("published")),
                 ' selected' if (r and r["status"] == "draft") else "",
+                esc(self.t("draft")),
+                esc(self.t("Body (Markdown)")),
                 "" if not r else esc(r["body"]),
+                esc(self.t("Save")),
                 self.url("/admin"),
+                esc(self.t("Cancel")),
                 ""
                 if not r
                 else '<form method="post" action="%s" onsubmit="return confirm(\'Delete this post?\')">'
                 '<input type="hidden" name="csrf" value="%s"><input type="hidden" name="id" value="%d">'
-                '<button class="danger" type="submit">Delete</button></form>'
-                % (self.url("/admin/delete"), esc(token), r["id"]),
+                '<button class="danger" type="submit">%s</button></form>'
+                % (self.url("/admin/delete"), esc(token), r["id"], esc(self.t("Delete"))),
             )
         )
-        self.page(conn, "Edit", body, user=user)
+        self.page(conn, self.t("Edit"), body, user=user)
 
     def view_settings(self, conn, user, qs):
         token = self.csrf(conn, user)
         body = (
-            '<h1 class="title">Settings</h1><form method="post" action="%s">'
+            '<h1 class="title">%s</h1><form method="post" action="%s">'
             '<input type="hidden" name="csrf" value="%s">'
-            '<label>Site title</label><input type="text" name="site_title" value="%s">'
-            '<label>Tagline</label><input type="text" name="tagline" value="%s">'
-            '<label>Footer</label><input type="text" name="footer" value="%s">'
-            '<label>Posts per page (1-50)</label><input type="text" name="per_page" value="%s">'
+            '<label>%s</label><input type="text" name="site_title" value="%s">'
+            '<label>%s</label><input type="text" name="tagline" value="%s">'
+            '<label>%s</label><input type="text" name="footer" value="%s">'
+            '<label>%s</label><input type="text" name="per_page" value="%s">'
             '<label><input type="checkbox" name="hide_admin_link" value="1"%s> '
-            "Hide the Admin link on the public site (visitors then reach it only via /admin)</label>"
-            '<button class="primary" type="submit">Save</button></form>'
+            "%s</label>"
+            '<button class="primary" type="submit">%s</button></form>'
             % (
+                esc(self.t("Settings")),
                 self.url("/admin/settings"),
                 esc(token),
+                esc(self.t("Site title")),
                 esc(get_setting(conn, "site_title")),
+                esc(self.t("Tagline")),
                 esc(get_setting(conn, "tagline")),
+                esc(self.t("Footer")),
                 esc(get_setting(conn, "footer")),
+                esc(self.t("Posts per page (1-50)")),
                 esc(get_setting(conn, "per_page", "10")),
                 " checked" if get_setting(conn, "hide_admin_link", "0") == "1" else "",
+                esc(self.t("Hide the Admin link on the public site (visitors then reach it only via /admin)")),
+                esc(self.t("Save")),
             )
         )
-        self.page(conn, "Settings", body, user=user, flash=(qs.get("ok") or [""])[0])
+        self.page(conn, self.t("Settings"), body, user=user, flash=(qs.get("ok") or [""])[0])
 
     def view_password(self, conn, user, qs):
         token = self.csrf(conn, user)
         body = (
-            '<h1 class="title">Change password</h1><form method="post" action="%s">'
+            '<h1 class="title">%s</h1><form method="post" action="%s">'
             '<input type="hidden" name="csrf" value="%s">'
-            '<label>Current password</label><input type="password" name="current">'
-            '<label>New password (min 8 chars)</label><input type="password" name="new">'
-            '<label>Repeat new password</label><input type="password" name="repeat">'
-            '<button class="primary" type="submit">Update</button></form>'
-            % (self.url("/admin/password"), esc(token))
+            '<label>%s</label><input type="password" name="current">'
+            '<label>%s</label><input type="password" name="new">'
+            '<label>%s</label><input type="password" name="repeat">'
+            '<button class="primary" type="submit">%s</button></form>'
+            % (
+                esc(self.t("Change password")),
+                self.url("/admin/password"),
+                esc(token),
+                esc(self.t("Current password")),
+                esc(self.t("New password (min 8 chars)")),
+                esc(self.t("Repeat new password")),
+                esc(self.t("Update")),
+            )
         )
-        self.page(conn, "Password", body, user=user, flash=(qs.get("ok") or [""])[0])
+        self.page(conn, self.t("Password"), body, user=user, flash=(qs.get("ok") or [""])[0])
 
     def view_backup(self, conn):
         tmp = tempfile.NamedTemporaryFile(prefix="jamweb-", suffix=".db", delete=False)
@@ -903,8 +1184,9 @@ class Handler(BaseHTTPRequestHandler):
             if not user:
                 return self.redirect(self.url("/admin"))
             if not self.check_csrf(conn, user, form.get("csrf", "")):
-                return self.page(conn, "Bad request",
-                                 "<h1 class='title'>Bad request</h1><p>Invalid or expired form token.</p>",
+                return self.page(conn, self.t("Bad request"),
+                                 "<h1 class='title'>%s</h1><p>%s</p>"
+                                 % (esc(self.t("Bad request")), esc(self.t("Invalid or expired form token."))),
                                  user=user, code=400)
 
             if path == "/admin/save":
@@ -924,8 +1206,10 @@ class Handler(BaseHTTPRequestHandler):
         now = time.time()
         count, until = self.server.fails.get(ip, (0, 0))
         if until > now:
-            return self.page(conn, "Log in",
-                             "<h1 class='title'>Log in</h1><p>Too many attempts. Try again shortly.</p>", code=429)
+            return self.page(conn, self.t("Log in"),
+                             "<h1 class='title'>%s</h1><p>%s</p>"
+                             % (esc(self.t("Log in")), esc(self.t("Too many attempts. Try again shortly."))),
+                             code=429)
         row = conn.execute(
             "SELECT * FROM users WHERE username=?", (form.get("username", ""),)
         ).fetchone()
@@ -950,9 +1234,11 @@ class Handler(BaseHTTPRequestHandler):
         slug = (form.get("slug") or "").strip().lower()
         pid = form.get("id", "")
         if not title:
-            return self.page(conn, "Edit", "<p>Title is required.</p>", user=user, code=400)
+            return self.page(conn, self.t("Edit"), "<p>%s</p>" % esc(self.t("Title is required.")),
+                             user=user, code=400)
         if slug and not re.match(r"^[a-z0-9][a-z0-9-]{0,80}$", slug):
-            return self.page(conn, "Edit", "<p>Slug must be lowercase letters, digits or dashes.</p>",
+            return self.page(conn, self.t("Edit"),
+                             "<p>%s</p>" % esc(self.t("Slug must be lowercase letters, digits or dashes.")),
                              user=user, code=400)
         if not slug:
             slug = slugify(title)
@@ -998,14 +1284,16 @@ class Handler(BaseHTTPRequestHandler):
         repeat = form.get("repeat") or ""
         row = conn.execute("SELECT * FROM users WHERE username=?", (user,)).fetchone()
         if not row or not verify_password(current, row["pw_hash"]):
-            return self.page(conn, "Password",
-                             "<p>Current password is wrong.</p>", user=user, code=400)
+            return self.page(conn, self.t("Password"),
+                             "<p>%s</p>" % esc(self.t("Current password is wrong.")), user=user, code=400)
         if len(new) < 8:
-            return self.page(conn, "Password",
-                             "<p>New password must be at least 8 characters.</p>", user=user, code=400)
+            return self.page(conn, self.t("Password"),
+                             "<p>%s</p>" % esc(self.t("New password must be at least 8 characters.")),
+                             user=user, code=400)
         if new != repeat:
-            return self.page(conn, "Password",
-                             "<p>The two new passwords do not match.</p>", user=user, code=400)
+            return self.page(conn, self.t("Password"),
+                             "<p>%s</p>" % esc(self.t("The two new passwords do not match.")),
+                             user=user, code=400)
         conn.execute("UPDATE users SET pw_hash=? WHERE username=?", (hash_password(new), user))
         conn.commit()
         return self.redirect(self.url("/admin/password?ok=Password updated"))
@@ -1028,14 +1316,16 @@ class Handler(BaseHTTPRequestHandler):
         if pages <= 1:
             return ""
         prev = (
-            '<a href="%s">‹ Newer</a>' % self.url("%s?page=%d" % (base, page - 1)) if page > 1 else "<span></span>"
+            '<a href="%s">‹ %s</a>' % (self.url("%s?page=%d" % (base, page - 1)), esc(self.t("Newer")))
+            if page > 1 else "<span></span>"
         )
         nxt = (
-            '<a href="%s">Older ›</a>' % self.url("%s?page=%d" % (base, page + 1))
+            '<a href="%s">%s ›</a>' % (self.url("%s?page=%d" % (base, page + 1)), esc(self.t("Older")))
             if page < pages
             else "<span></span>"
         )
-        return '<div class="pager">%s<span class="meta">page %d / %d</span>%s</div>' % (prev, page, pages, nxt)
+        return '<div class="pager">%s<span class="meta">%s %d / %d</span>%s</div>' % (
+            prev, esc(self.t("page")), page, pages, nxt)
 
     def rfc822(self, stamp):
         try:
